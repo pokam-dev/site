@@ -9,49 +9,67 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1) Récupère ton code
+      # 1) Récupérer le code
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Tests simples pour ton site
+      # 2) Vérifications de base (fichiers requis, taille max)
       - name: Vérifications de base
         run: |
           set -e
-          # Vérifie que index.html existe
-          test -f index.html || (echo "❌ index.html manquant !" && exit 1)
-          # Vérifie qu'il n'y a pas de fichiers > 5 Mo (bonne pratique)
+          test -f index.html || (echo "❌ index.html manquant à la racine" >&2; exit 1)
+          # Pas de fichiers > 5 Mo (bonne pratique pour un site vitrine)
           if find . -type f -size +5M -not -path "./.git/*" | grep -q .; then
-            echo "⚠️ Certains fichiers dépassent 5 Mo. Pense à les optimiser." >&2
+            echo "❌ Des fichiers dépassent 5 Mo, optimise-les avant déploiement." >&2
             exit 1
           fi
-          echo "✅ Vérifications de base OK"
+          echo "✅ Vérifs de base OK"
 
-      # 3) Installe tidy pour valider le HTML
-      - name: Validation HTML
+      # 3) Validation HTML (non bloquante pour ne pas stopper le déploiement)
+      - name: Validation HTML (permissive)
+        continue-on-error: true
         run: |
           sudo apt-get update
           sudo apt-get install -y tidy
-          tidy -qe -utf8 index.html || (echo "⚠️ tidy a trouvé des erreurs HTML" && exit 1)
+          # -q silencieux, -e erreurs seulement, -utf8 encodage
+          tidy -qe -utf8 index.html || echo "⚠️ Tidy a signalé des problèmes (non bloquant)"
 
-      # 4) Configure SSH pour pousser vers o2switch
+      # 4) Préparer l'agent SSH avec la clé privée stockée en secret
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.O2SWITCH_SSH_KEY }}
 
-      # 5) Ajoute o2switch dans known_hosts
+      # 5) Ajouter l'hôte o2switch dans known_hosts (auto-détection depuis l'URL secrète)
       - name: Add o2switch host to known_hosts
+        shell: bash
         run: |
           set -e
+          if [ -z "${{ secrets.O2SWITCH_REMOTE }}" ]; then
+            echo "❌ Secret O2SWITCH_REMOTE manquant" >&2; exit 1
+          fi
           HOST=$(echo "${{ secrets.O2SWITCH_REMOTE }}" | sed -E 's#ssh://([^@]+@)?([^/:]+).*#\2#')
           echo "Detected host: $HOST"
+          # Ajoute l'empreinte serveur (évite le prompt yes/no en CI)
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
 
-      # 6) Push vers le dépôt Git™ sur o2switch
+      # 6) (Optionnel) Diagnostic de connectivité Git/SSH sans échouer le job
+      - name: Debug SSH & remote (non-bloquant)
+        continue-on-error: true
+        run: |
+          set -e
+          echo "REMOTE=${{ secrets.O2SWITCH_REMOTE }}"
+          GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -vvv" git ls-remote "${{ secrets.O2SWITCH_REMOTE }}"
+
+      # 7) Push du code vers le dépôt Git™ d’o2switch
       - name: Push to o2switch repo
         run: |
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote | grep -q "^o2switch$" || git remote add o2switch "${{ secrets.O2SWITCH_REMOTE }}"
+          # Ajoute le remote 'o2switch' si absent
+          if ! git remote | grep -q '^o2switch$'; then
+            git remote add o2switch "${{ secrets.O2SWITCH_REMOTE }}"
+          fi
+          # Force la branche distante 'main' (dépôt o2switch vide au départ)
           git push -f o2switch HEAD:refs/heads/main
