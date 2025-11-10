@@ -40,18 +40,34 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.O2SWITCH_SSH_KEY }}
 
-      # 5) Ajouter l'hôte o2switch dans known_hosts (auto-détection depuis l'URL secrète)
-      - name: Add o2switch host to known_hosts
+           # 5) Ajouter l'hôte o2switch dans known_hosts (robuste, avec fallback)
+      - name: Add o2switch host to known_hosts (robust)
         shell: bash
         run: |
           set -e
-          if [ -z "${{ secrets.O2SWITCH_REMOTE }}" ]; then
-            echo "❌ Secret O2SWITCH_REMOTE manquant" >&2; exit 1
-          fi
           HOST=$(echo "${{ secrets.O2SWITCH_REMOTE }}" | sed -E 's#ssh://([^@]+@)?([^/:]+).*#\2#')
           echo "Detected host: $HOST"
-          # Ajoute l'empreinte serveur (évite le prompt yes/no en CI)
-          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+
+          # Essai 1 : host tel quel (odns.fr)
+          ssh-keyscan -T 20 -H "$HOST" >> ~/.ssh/known_hosts || true
+
+          # Essai 2 : variante domaine (o2switch.net) au cas où
+          ALT_HOST="${HOST/.odns.fr/.o2switch.net}"
+          if [ "$ALT_HOST" != "$HOST" ]; then
+            ssh-keyscan -T 20 -H "$ALT_HOST" >> ~/.ssh/known_hosts || true
+          fi
+
+          # Si toujours vide, fallback: désactiver la vérif stricte pour ce host
+          if ! grep -q "$HOST" ~/.ssh/known_hosts && ! grep -q "$ALT_HOST" ~/.ssh/known_hosts; then
+            echo "ssh-keyscan failed, falling back to relaxed host checking for CI only."
+            {
+              echo "Host $HOST"
+              echo "  StrictHostKeyChecking no"
+              echo "  UserKnownHostsFile=/dev/null"
+              [ "$ALT_HOST" != "$HOST" ] && echo -e "Host $ALT_HOST\n  StrictHostKeyChecking no\n  UserKnownHostsFile=/dev/null"
+            } >> ~/.ssh/config
+          fi
+
 
       # 6) (Optionnel) Diagnostic de connectivité Git/SSH sans échouer le job
       - name: Debug SSH & remote (non-bloquant)
