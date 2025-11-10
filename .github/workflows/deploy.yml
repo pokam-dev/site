@@ -1,0 +1,57 @@
+name: CI & Deploy to o2switch
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1) Récupère ton code
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2) Tests simples pour ton site
+      - name: Vérifications de base
+        run: |
+          set -e
+          # Vérifie que index.html existe
+          test -f index.html || (echo "❌ index.html manquant !" && exit 1)
+          # Vérifie qu'il n'y a pas de fichiers > 5 Mo (bonne pratique)
+          if find . -type f -size +5M -not -path "./.git/*" | grep -q .; then
+            echo "⚠️ Certains fichiers dépassent 5 Mo. Pense à les optimiser." >&2
+            exit 1
+          fi
+          echo "✅ Vérifications de base OK"
+
+      # 3) Installe tidy pour valider le HTML
+      - name: Validation HTML
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tidy
+          tidy -qe -utf8 index.html || (echo "⚠️ tidy a trouvé des erreurs HTML" && exit 1)
+
+      # 4) Configure SSH pour pousser vers o2switch
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.O2SWITCH_SSH_KEY }}
+
+      # 5) Ajoute o2switch dans known_hosts
+      - name: Add o2switch host to known_hosts
+        run: |
+          set -e
+          HOST=$(echo "${{ secrets.O2SWITCH_REMOTE }}" | sed -E 's#ssh://([^@]+@)?([^/:]+).*#\2#')
+          echo "Detected host: $HOST"
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+
+      # 6) Push vers le dépôt Git™ sur o2switch
+      - name: Push to o2switch repo
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote | grep -q "^o2switch$" || git remote add o2switch "${{ secrets.O2SWITCH_REMOTE }}"
+          git push -f o2switch HEAD:refs/heads/main
