@@ -1,25 +1,17 @@
 ---
 deployment:
   tasks:
-    - set -e
-    - echo "== BEGIN $(date)"
-    - echo "PWD: $(pwd)"
-    - echo "-- Source listing --"
-    - ls -la .
+    - /bin/echo "=== BEGIN DEPLOY ==="
+    - /bin/echo "Source directory:"; /bin/pwd; /bin/ls -la .
 
-    # Chemin de déploiement = document root du sous-domaine
-    - export DEPLOYPATH=/home/keze7545/public_html/tp
-    - mkdir -p "$DEPLOYPATH"
-
-    # cPanel recommande d'exécuter depuis le working tree (.)
-    # Utilise rsync du système (/usr/bin/rsync sur o2switch)
+    # Définir la cible (DocumentRoot du sous-domaine)
+    - /bin/echo "Deploying to /home/keze7545/public_html/tp"
     - /usr/bin/rsync -av --delete \
         --exclude ".git*" \
         --exclude ".github" \
         --exclude ".cpanel.yml" \
         --exclude "README.md" \
-        ./ "$DEPLOYPATH"/
+        ./ /home/keze7545/public_html/tp/
 
-    - echo "-- Target listing --"
-    - ls -la "$DEPLOYPATH"
-    - echo "== END $(date)"
+    - /bin/echo "Target content:"; /bin/ls -la /home/keze7545/public_html/tp
+    - /bin/echo "=== DEPLOY COMPLETE ==="
