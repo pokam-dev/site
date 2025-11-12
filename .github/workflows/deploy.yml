@@ -39,34 +39,41 @@ jobs:
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.O2SWITCH_SSH_KEY }}
-
-           # 5) Ajouter l'hôte o2switch dans known_hosts (robuste, avec fallback)
-      - name: Add o2switch host to known_hosts (robust)
+          
+      # 5) Ajouter l'hôte SSH dans known_hosts (résilient)
+      - name: Add o2switch host to known_hosts (resilient)
+        continue-on-error: true
         shell: bash
         run: |
           set -e
+          # Prépare ~/.ssh
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          touch ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+          # Détecte le host depuis O2SWITCH_REMOTE
           HOST=$(echo "${{ secrets.O2SWITCH_REMOTE }}" | sed -E 's#ssh://([^@]+@)?([^/:]+).*#\2#')
           echo "Detected host: $HOST"
 
-          # Essai 1 : host tel quel (odns.fr)
-          ssh-keyscan -T 20 -H "$HOST" >> ~/.ssh/known_hosts || true
-
-          # Essai 2 : variante domaine (o2switch.net) au cas où
+          # Tentatives d'ajout de la clé (ne cassent pas le job si échec)
+          ssh-keyscan -T 30 -H "$HOST" >> ~/.ssh/known_hosts || true
           ALT_HOST="${HOST/.odns.fr/.o2switch.net}"
           if [ "$ALT_HOST" != "$HOST" ]; then
-            ssh-keyscan -T 20 -H "$ALT_HOST" >> ~/.ssh/known_hosts || true
+            ssh-keyscan -T 30 -H "$ALT_HOST" >> ~/.ssh/known_hosts || true
           fi
 
-          # Si toujours vide, fallback: désactiver la vérif stricte pour ce host
-          if ! grep -q "$HOST" ~/.ssh/known_hosts && ! grep -q "$ALT_HOST" ~/.ssh/known_hosts; then
-            echo "ssh-keyscan failed, falling back to relaxed host checking for CI only."
-            {
-              echo "Host $HOST"
-              echo "  StrictHostKeyChecking no"
-              echo "  UserKnownHostsFile=/dev/null"
-              [ "$ALT_HOST" != "$HOST" ] && echo -e "Host $ALT_HOST\n  StrictHostKeyChecking no\n  UserKnownHostsFile=/dev/null"
-            } >> ~/.ssh/config
-          fi
+          # Fallback : désactiver la vérif stricte pour ce host côté CI uniquement
+          {
+            echo "Host $HOST"
+            echo "  StrictHostKeyChecking no"
+            echo "  UserKnownHostsFile=/dev/null"
+          } >> ~/.ssh/config
+          chmod 600 ~/.ssh/config || true
+
+          echo "known_hosts:"
+          wc -l ~/.ssh/known_hosts || true
+
 
 
       # 6) (Optionnel) Diagnostic de connectivité Git/SSH sans échouer le job
