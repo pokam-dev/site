@@ -90,9 +90,6 @@ jobs:
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Ajoute le remote 'o2switch' si absent
-          if ! git remote | grep -q '^o2switch$'; then
-            git remote add o2switch "${{ secrets.O2SWITCH_REMOTE }}"
-          fi
-          # Force la branche distante 'main' (dépôt o2switch vide au départ)
-          git push -f o2switch HEAD:refs/heads/main
+          git remote | grep -q '^o2switch$' || git remote add o2switch "${{ secrets.O2SWITCH_REMOTE }}"
+          # Utilise la config SSH ajoutée (StrictHostKeyChecking no) et BatchMode
+          GIT_SSH_COMMAND="ssh -o BatchMode=yes" git push -f o2switch HEAD:refs/heads/main
