@@ -2,23 +2,24 @@
 deployment:
   tasks:
     - set -e
-    - echo "== BEGIN $(date)" >> /home/keze7545/deploy.log
-    - echo "PWD: $(pwd)"       >> /home/keze7545/deploy.log
-    - echo "-- Source listing --" >> /home/keze7545/deploy.log
-    - /bin/ls -la .            >> /home/keze7545/deploy.log
+    - echo "== BEGIN $(date)"
+    - echo "PWD: $(pwd)"
+    - echo "-- Source listing --"
+    - ls -la .
 
-    # Chemin cible du sous-domaine (ajuste si nécessaire)
+    # Chemin de déploiement = document root du sous-domaine
     - export DEPLOYPATH=/home/keze7545/public_html/tp
-    - /bin/mkdir -p "$DEPLOYPATH"
+    - mkdir -p "$DEPLOYPATH"
 
-    - echo "Deploy to: $DEPLOYPATH" >> /home/keze7545/deploy.log
-    - /bin/rsync -av --delete \
+    # cPanel recommande d'exécuter depuis le working tree (.)
+    # Utilise rsync du système (/usr/bin/rsync sur o2switch)
+    - /usr/bin/rsync -av --delete \
         --exclude ".git*" \
         --exclude ".github" \
         --exclude ".cpanel.yml" \
         --exclude "README.md" \
-        ./ "$DEPLOYPATH"       >> /home/keze7545/deploy.log 2>&1
+        ./ "$DEPLOYPATH"/
 
-    - echo "-- Target listing --" >> /home/keze7545/deploy.log
-    - /bin/ls -la "$DEPLOYPATH"  >> /home/keze7545/deploy.log
-    - echo "== END $(date)"      >> /home/keze7545/deploy.log
+    - echo "-- Target listing --"
+    - ls -la "$DEPLOYPATH"
+    - echo "== END $(date)"
