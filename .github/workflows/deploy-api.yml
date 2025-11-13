@@ -1,21 +1,21 @@
-name: CI & Deploy to o2switch via API
+name: CI/CD vers o2switch via API
 
 on:
   push:
     branches: ["main"]
 
 jobs:
-  Test-and-Deploy-API:
+  Test-and-Deploy-web-via-API:
     runs-on: ubuntu-latest
 
     env:
-      CPANEL_SERVER: ${{ secrets.CPANEL_SERVER }}      # ex: truie.o2switch.net
-      CPANEL_LOGIN:  ${{ secrets.CPANEL_LOGIN }}       # ex: keze7545
+      CPANEL_SERVER: ${{ secrets.CPANEL_SERVER }}      # ex: mon_id.o2switch.net
+      CPANEL_LOGIN:  ${{ secrets.CPANEL_LOGIN }}       # ex: mon_id
       CPANEL_TOKEN:  ${{ secrets.CPANEL_TOKEN }}       # token API cPanel
-      O2SWITCH_REMOTE: ${{ secrets.O2SWITCH_REMOTE }}  # ssh://keze7545@truie.o2switch.net/home/keze7545/repositories/tp-site
+      O2SWITCH_REMOTE: ${{ secrets.O2SWITCH_REMOTE }}  # repertoire cloner
 
     steps:
-      # 1) Checkout complet (pas shallow)
+      # 1) Checkout complet
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -59,7 +59,7 @@ jobs:
           echo "$RESP" | jq .
           test "$(echo "$RESP" | jq -r '.status')" = "1"
 
-      # 5) Agent SSH (clé privée sans passphrase)
+      # 5) Agent SSH (clé privée)
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
