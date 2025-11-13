@@ -5,7 +5,7 @@ on:
     branches: ["main"]
 
 jobs:
-  Test-and-Deploy-API:
+  Test-and-Deploy-web-via-API:
     runs-on: ubuntu-latest
 
     env:
