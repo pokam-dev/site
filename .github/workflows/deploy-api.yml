@@ -1,4 +1,4 @@
-name: CI & Deploy to o2switch via API
+name: CI/CD vers o2switch via API
 
 on:
   push:
