@@ -9,13 +9,13 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      CPANEL_SERVER: ${{ secrets.CPANEL_SERVER }}      # ex: truie.o2switch.net
-      CPANEL_LOGIN:  ${{ secrets.CPANEL_LOGIN }}       # ex: keze7545
+      CPANEL_SERVER: ${{ secrets.CPANEL_SERVER }}      # ex: mon_id.o2switch.net
+      CPANEL_LOGIN:  ${{ secrets.CPANEL_LOGIN }}       # ex: mon_id
       CPANEL_TOKEN:  ${{ secrets.CPANEL_TOKEN }}       # token API cPanel
-      O2SWITCH_REMOTE: ${{ secrets.O2SWITCH_REMOTE }}  # ssh://keze7545@truie.o2switch.net/home/keze7545/repositories/tp-site
+      O2SWITCH_REMOTE: ${{ secrets.O2SWITCH_REMOTE }}  # repertoire cloner
 
     steps:
-      # 1) Checkout complet (pas shallow)
+      # 1) Checkout complet
       - name: Checkout
         uses: actions/checkout@v4
         with:
