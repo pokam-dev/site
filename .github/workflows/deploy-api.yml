@@ -59,7 +59,7 @@ jobs:
           echo "$RESP" | jq .
           test "$(echo "$RESP" | jq -r '.status')" = "1"
 
-      # 5) Agent SSH (clé privée sans passphrase)
+      # 5) Agent SSH (clé privée)
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
