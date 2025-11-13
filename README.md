@@ -17,13 +17,18 @@ Lien du site : 👉 [https://tp.p-wf.fr](https://tp.p-wf.fr)
 
 ---
 
-## Structure du projet
+##  Structure du projet
 
+```bash
+.
 ├── index.html
 ├── Style.css
 ├── img/
-├── .github/workflows/deploy-api.yml (task, job)
-└── .cpanel.yml (script de deploiement)
+├── .github/
+│   └── workflows/
+│       └── deploy-api.yml   # (tâches CI/CD)
+└── .cpanel.yml              # (script de déploiement côté o2switch)
+
 
 ---
 
