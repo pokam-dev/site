@@ -1,13 +1,22 @@
 ---
 deployment:
   tasks:
-    - /bin/echo "=== BEGIN DEPLOY ==="
-    - /bin/echo "Source directory:"; /bin/pwd; /bin/ls -la .
-    - /bin/echo "Deploying to /home/keze7545/public_html/tp"
-    - /usr/bin/rsync -av --delete --exclude=".git*" --exclude=".github" --exclude=".cpanel.yml" --exclude="README.md" ./ /home/keze7545/public_html/tp/
-    - /bin/find /home/keze7545/public_html/tp -type d -exec chmod 755 {} \;
-    - /bin/find /home/keze7545/public_html/tp -type f -exec chmod 644 {} \;
-    - /bin/chmod 644 /home/keze7545/public_html/tp/.htaccess
-    - /bin/echo "Target content:"; /bin/ls -la /home/keze7545/public_html/tp
-    - /bin/echo "=== DEPLOY COMPLETE ==="
+    # Dossier de déploiement (par défaut: tp). Le workflow peut surcharger DEPLOY_FOLDER.
+    - export DEPLOY_FOLDER="${DEPLOY_FOLDER:-tp}"
+    - export DEPLOYPATH="$HOME/public_html/${DEPLOY_FOLDER}"
+    - /bin/echo "Deploying to $DEPLOYPATH"
+
+    # Crée le dossier si besoin
+    - /bin/mkdir -p "$DEPLOYPATH"
+
+    # Sync du working tree vers le docroot
+    - /usr/bin/rsync -az --delete --exclude ".git/" --exclude ".github/" ./ "$DEPLOYPATH/"
+
+    # Permissions safe (évite 403)
+    - /usr/bin/find "$DEPLOYPATH" -type d -exec chmod 755 {} \;
+    - /usr/bin/find "$DEPLOYPATH" -type f -exec chmod 644 {} \;
+
+    # Trace (utile en debug)
+    - /bin/echo "Deployed on $(/bin/date -Iseconds)" > "$DEPLOYPATH/deploy-info.txt"
+
 
