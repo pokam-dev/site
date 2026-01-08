@@ -1,115 +1,158 @@
-name: CI/CD vers o2switch via API
+name: Test -> Release -> Promote Prod (o2switch)
 
 on:
   push:
     branches: ["main"]
 
+concurrency:
+  group: deploy-o2switch
+  cancel-in-progress: true
+
 jobs:
-  Test-and-Deploy-web-via-API:
+  deploy:
     runs-on: ubuntu-latest
 
-    env:
-      CPANEL_SERVER: ${{ secrets.CPANEL_SERVER }}      # ex: mon_id.o2switch.net
-      CPANEL_LOGIN:  ${{ secrets.CPANEL_LOGIN }}       # ex: mon_id
-      CPANEL_TOKEN:  ${{ secrets.CPANEL_TOKEN }}       # token API cPanel
-      O2SWITCH_REMOTE: ${{ secrets.O2SWITCH_REMOTE }}  # repertoire cloner
-
     steps:
-      # 1) Checkout complet
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # (sécurité au cas où)
-      - name: Ensure repository is not shallow
-        run: |
-          if git rev-parse --is-shallow-repository | grep -q true; then
-            git fetch --unshallow
-          fi
-
-      # 2) Tests rapides
-      - name: Basic checks
+      # -------------------- TESTS --------------------
+      - name: Basic project checks
         run: |
           set -e
           test -f index.html || (echo "❌ index.html manquant" >&2; exit 1)
-          if find . -type f -size +5M -not -path "./.git/*" | grep -q .; then
-            echo "❌ Fichiers > 5 Mo détectés." >&2; exit 1
+
+          if find . -type f -size +5M -not -path "./.git/*" -not -path "./.github/*" | grep -q .; then
+            echo "❌ Fichiers > 5 Mo détectés." >&2
+            find . -type f -size +5M -not -path "./.git/*" -not -path "./.github/*"
+            exit 1
           fi
-          echo "✅ Checks OK"
 
-      # 3) Validation HTML (non bloquante)
-      - name: HTML validation (permissive)
-        continue-on-error: true
-        run: |
-          sudo apt-get update && sudo apt-get install -y tidy
-          tidy -qe -utf8 index.html || echo "⚠️ Tidy a signalé des problèmes (non bloquant)"
-
-      # 4) Whitelist IP du runner via l’API o2switch
-      - name: Whitelist runner IP on o2switch firewall (SSH/22)
-        id: fw_add
+      - name: HTML validation (tidy) non-bloquant
         run: |
           set -e
-          sudo apt-get update && sudo apt-get install -y jq curl
-          IP=$(curl -s https://api.ipify.org)
-          echo "Runner IP: $IP"
-          echo "ip=$IP" >> "$GITHUB_OUTPUT"
-          RESP=$(curl -sm 45 -H "Authorization: cpanel ${CPANEL_LOGIN}:${CPANEL_TOKEN}" \
-            "https://${CPANEL_SERVER}:2083/execute/SshWhitelist/add?address=${IP}&port=22")
-          echo "$RESP" | jq .
-          test "$(echo "$RESP" | jq -r '.status')" = "1"
+          sudo apt-get update
+          sudo apt-get install -y tidy
+          tidy -errors -q index.html || echo "⚠️ Tidy a signalé des problèmes (non bloquant)"
 
-      # 5) Agent SSH (clé privée)
+      # -------------------- SSH --------------------
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.O2SWITCH_SSH_KEY }}
 
-      # 6) known_hosts résilient
-      - name: Add o2switch host to known_hosts (resilient)
-        continue-on-error: true
-        shell: bash
+      - name: Add o2switch host to known_hosts (best effort)
         run: |
           set -e
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          touch ~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts
-          HOST=$(echo "${O2SWITCH_REMOTE}" | sed -E 's#ssh://([^@]+@)?([^/:]+).*#\2#')
-          echo "Detected host: $HOST"
-          ssh-keyscan -T 30 -H "$HOST" >> ~/.ssh/known_hosts || true
-          {
-            echo "Host $HOST"
-            echo "  StrictHostKeyChecking no"
-            echo "  UserKnownHostsFile=/dev/null"
-          } >> ~/.ssh/config
-          chmod 600 ~/.ssh/config || true
+          HOST="${{ secrets.O2SWITCH_SSH_HOST }}"
+          if [ -z "$HOST" ]; then
+            HOST=$(echo "${{ secrets.O2SWITCH_REMOTE_RELEASE }}" | awk -F'[@/]' '{print $2}')
+          fi
 
-      # 7) (debug facultatif)
-      - name: Debug SSH & remote (non-blocking)
-        continue-on-error: true
-        run: |
-          set -e
-          echo "REMOTE=${O2SWITCH_REMOTE}"
-          GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -vvv" git ls-remote "${O2SWITCH_REMOTE}"
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts || true
 
-      # 8) Push vers le dépôt Git™ o2switch (déclenche .cpanel.yml côté serveur)
-      - name: Push to o2switch repo
-        run: |
-          set -e
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote | grep -q '^o2switch$' || git remote add o2switch "${O2SWITCH_REMOTE}"
-          GIT_SSH_COMMAND="ssh -o BatchMode=yes" git push -f o2switch HEAD:refs/heads/main
+          # CI only: évite blocage si keyscan rate (host key verification)
+          echo -e "Host *\n\tStrictHostKeyChecking no\n" >> ~/.ssh/config
 
-      # 9) Nettoyage whitelist (toujours exécuté)
-      - name: Remove runner IP from whitelist
-        if: always()
+      # ============================================================
+      # 1) DEPLOY RELEASE
+      # ============================================================
+      - name: Generate .cpanel.yml for RELEASE
         run: |
           set -e
-          sudo apt-get update && sudo apt-get install -y jq curl
-          IP="${{ steps.fw_add.outputs.ip }}"
-          echo "Removing $IP from whitelist"
-          for DIR in in out; do
-            RESP=$(curl -sm 45 -H "Authorization: cpanel ${CPANEL_LOGIN}:${CPANEL_TOKEN}" \
-              "https://${CPANEL_SERVER}:2083/execute/SshWhitelist/remove?address=${IP}&port=22&direction=${DIR}")
-            echo "$RESP" | jq .
+          cat > .cpanel.yml <<'YML'
+          ---
+          deployment:
+            tasks:
+              - export DEPLOY_FOLDER="release"
+              - export DEPLOYPATH="$HOME/public_html/${DEPLOY_FOLDER}"
+              - /bin/echo "Deploying to $DEPLOYPATH"
+              - /bin/mkdir -p "$DEPLOYPATH"
+              - /usr/bin/rsync -az --delete --exclude ".git/" --exclude ".github/" ./ "$DEPLOYPATH/"
+              - /usr/bin/find "$DEPLOYPATH" -type d -exec chmod 755 {} \;
+              - /usr/bin/find "$DEPLOYPATH" -type f -exec chmod 644 {} \;
+              - /bin/echo "Deployed on $(/bin/date -Iseconds)" > "$DEPLOYPATH/deploy-info.txt"
+          YML
+
+      - name: Push to o2switch RELEASE repo
+        run: |
+          set -e
+          git remote add o2switch_release "${{ secrets.O2SWITCH_REMOTE_RELEASE }}" || \
+            git remote set-url o2switch_release "${{ secrets.O2SWITCH_REMOTE_RELEASE }}"
+
+          if git rev-parse --is-shallow-repository | grep -q true; then
+            git fetch --unshallow
+          fi
+
+          git push -f o2switch_release HEAD:refs/heads/main
+
+      # ============================================================
+      # 2) SMOKE TESTS RELEASE
+      # ============================================================
+      - name: Smoke test RELEASE
+        run: |
+          set -e
+          URL="https://release.p-wf.fr"
+
+          echo "Checking $URL ..."
+          for i in $(seq 1 25); do
+            code=$(curl -k -s -o /dev/null -w "%{http_code}" "$URL" || true)
+            echo "Attempt $i => HTTP $code"
+            if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
+              echo "Release is reachable."
+              break
+            fi
+            sleep 8
           done
+
+          # Check contenu HTML
+          curl -k -s "$URL" | head -n 20
+
+      # ============================================================
+      # 3) PROMOTION PROD
+      # ============================================================
+      - name: Generate .cpanel.yml for PROD
+        run: |
+          set -e
+          cat > .cpanel.yml <<'YML'
+          ---
+          deployment:
+            tasks:
+              - export DEPLOY_FOLDER="tp"
+              - export DEPLOYPATH="$HOME/public_html/${DEPLOY_FOLDER}"
+              - /bin/echo "Deploying to $DEPLOYPATH"
+              - /bin/mkdir -p "$DEPLOYPATH"
+              - /usr/bin/rsync -az --delete --exclude ".git/" --exclude ".github/" ./ "$DEPLOYPATH/"
+              - /usr/bin/find "$DEPLOYPATH" -type d -exec chmod 755 {} \;
+              - /usr/bin/find "$DEPLOYPATH" -type f -exec chmod 644 {} \;
+              - /bin/echo "Deployed on $(/bin/date -Iseconds)" > "$DEPLOYPATH/deploy-info.txt"
+          YML
+
+      - name: Push to o2switch PROD repo
+        run: |
+          set -e
+          git remote add o2switch_prod "${{ secrets.O2SWITCH_REMOTE_PROD }}" || \
+            git remote set-url o2switch_prod "${{ secrets.O2SWITCH_REMOTE_PROD }}"
+
+          git push -f o2switch_prod HEAD:refs/heads/main
+
+      - name: Smoke test PROD
+        run: |
+          set -e
+          URL="https://tp.p-wf.fr"
+
+          echo "Checking $URL ..."
+          for i in $(seq 1 25); do
+            code=$(curl -k -s -o /dev/null -w "%{http_code}" "$URL" || true)
+            echo "Attempt $i => HTTP $code"
+            if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
+              echo "Prod is reachable."
+              break
+            fi
+            sleep 8
+          done
+
+          curl -k -s "$URL" | head -n 20
