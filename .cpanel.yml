@@ -1,39 +1,21 @@
 ---
 deployment:
   tasks:
-    # 0) Log d'info
-    - echo "=== cPanel Deployment started ==="
-    - echo "PWD=$(pwd)"
-    - echo "HOME=$HOME"
-
-    # 1) Déterminer automatiquement la cible selon le repo cPanel
-    #    - Sur cPanel, le working tree est dans /home/<user>/repositories/<repo>
-    #    - Donc basename(pwd) => tp-site OU release
     - export REPO_NAME="$(basename "$(pwd)")"
     - if [ "$REPO_NAME" = "release" ]; then export TARGET_DIR="$HOME/public_html/release"; else export TARGET_DIR="$HOME/public_html/tp"; fi
-    - echo "Repo detected: $REPO_NAME"
-    - echo "Target directory: $TARGET_DIR"
+    - echo "📦 Repo: $REPO_NAME"
+    - echo "🎯 Target: $TARGET_DIR"
 
-    # 2) Créer la cible si besoin
     - /bin/mkdir -p "$TARGET_DIR"
 
-    # 3) Copier le contenu vers la cible (miroir propre)
-    #    - rsync -a : conserve arborescence
-    #    - --delete : supprime côté web les fichiers supprimés dans Git
-    #    - --exclude : ne publie pas la partie Git / CI
     - /bin/rsync -az --delete \
         --exclude=".git/" \
         --exclude=".github/" \
         --exclude=".cpanel.yml" \
         ./ "$TARGET_DIR/"
 
-    # 4) Permissions propres (évite le 403 "unable to read htaccess")
-    #    Dossiers: 755 / Fichiers: 644 / .htaccess: 644
     - /bin/find "$TARGET_DIR" -type d -exec chmod 755 {} \;
     - /bin/find "$TARGET_DIR" -type f -exec chmod 644 {} \;
     - if [ -f "$TARGET_DIR/.htaccess" ]; then chmod 644 "$TARGET_DIR/.htaccess"; fi
 
-    # 5) Petite preuve
     - echo "✅ Deployed to $TARGET_DIR"
-    - /bin/ls -la "$TARGET_DIR" | head -n 50
-    - echo "=== cPanel Deployment finished ==="
