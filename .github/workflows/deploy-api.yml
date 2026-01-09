@@ -79,6 +79,35 @@ jobs:
           # CI only: évite blocage strict si keyscan est flaky
           echo -e "Host *\n\tStrictHostKeyChecking no\n" >> ~/.ssh/config
 
+          # ... (votre code précédent : tests, SSH agent, etc.)
+
+      # ============================================================
+      # NOUVEAU : SAUVEGARDE AUTOMATIQUE VERS CLOUDFLARE R2
+      # ============================================================
+      - name: Sauvegarde vers Cloudflare R2
+        run: |
+          sudo apt-get update && sudo apt-get install -y rclone
+          
+          # Configuration temporaire de rclone pour R2
+          export RCLONE_CONFIG_R2_TYPE=s3
+          export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
+          export RCLONE_CONFIG_R2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}
+          export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}
+          export RCLONE_CONFIG_R2_ENDPOINT=${{ secrets.R2_ENDPOINT }}
+          export RCLONE_CONFIG_R2_ACL=private
+
+          # Synchronisation vers un dossier daté dans votre bucket
+          # Le nom du bucket est "version-de-sauvegarde" (vu sur vos captures)
+          rclone sync ./ R2:"version-de-sauvegarde/backups/$(date +%Y-%m-%d_%H-%M)" \
+            --exclude ".git/**" \
+            --exclude ".github/**"
+
+      # ============================================================
+      # 1) DEPLOY RELEASE (Votre code existant continue ici)
+      # ============================================================
+      - name: Generate .cpanel.yml for RELEASE
+# ...
+
       # ============================================================
       # 1) DEPLOY RELEASE
       # ============================================================
