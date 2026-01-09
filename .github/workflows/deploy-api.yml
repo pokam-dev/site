@@ -9,8 +9,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy:
+  test-and-deploy:
     runs-on: ubuntu-latest
+
+    env:
+      CPANEL_SERVER:  ${{ secrets.CPANEL_SERVER }}
+      CPANEL_LOGIN:   ${{ secrets.CPANEL_LOGIN }}
+      CPANEL_TOKEN:   ${{ secrets.CPANEL_TOKEN }}
+      O2SWITCH_REMOTE_RELEASE: ${{ secrets.O2SWITCH_REMOTE_RELEASE }}
+      O2SWITCH_REMOTE_PROD:    ${{ secrets.O2SWITCH_REMOTE_PROD }}
 
     steps:
       - name: Checkout
@@ -21,7 +28,7 @@ jobs:
       # -------------------- TESTS --------------------
       - name: Basic project checks
         run: |
-          set -e
+          set -euo pipefail
           test -f index.html || (echo "❌ index.html manquant" >&2; exit 1)
 
           if find . -type f -size +5M -not -path "./.git/*" -not -path "./.github/*" | grep -q .; then
@@ -32,10 +39,25 @@ jobs:
 
       - name: HTML validation (tidy) non-bloquant
         run: |
-          set -e
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y tidy
           tidy -errors -q index.html || echo "⚠️ Tidy a signalé des problèmes (non bloquant)"
+
+      # -------------------- (optionnel) Test API cPanel --------------------
+      # Utile uniquement si tu veux piloter des actions cPanel via API.
+      # Ici on fait juste un check "auth OK" (non bloquant).
+      - name: cPanel API sanity check (non-bloquant)
+        run: |
+          set -euo pipefail
+          if [ -n "${CPANEL_SERVER:-}" ] && [ -n "${CPANEL_LOGIN:-}" ] && [ -n "${CPANEL_TOKEN:-}" ]; then
+            curl -sS -k \
+              -H "Authorization: cpanel ${CPANEL_LOGIN}:${CPANEL_TOKEN}" \
+              "https://${CPANEL_SERVER}:2083/execute/VersionControl/list_repositories" \
+              | head -c 300 || true
+          else
+            echo "CPANEL_* secrets not set, skipping."
+          fi
 
       # -------------------- SSH --------------------
       - name: Setup SSH agent
@@ -45,16 +67,16 @@ jobs:
 
       - name: Add o2switch host to known_hosts (best effort)
         run: |
-          set -e
-          HOST="${{ secrets.O2SWITCH_SSH_HOST }}"
-          if [ -z "$HOST" ]; then
-            HOST=$(echo "${{ secrets.O2SWITCH_REMOTE_RELEASE }}" | awk -F'[@/]' '{print $2}')
-          fi
+          set -euo pipefail
+
+          # Détecte le host depuis l'URL release: ssh://user@host/....
+          HOST=$(echo "${O2SWITCH_REMOTE_RELEASE}" | awk -F'[@/]' '{print $2}')
+          echo "Detected host: $HOST"
 
           mkdir -p ~/.ssh
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts || true
 
-          # CI only: évite blocage si keyscan rate (host key verification)
+          # CI only: évite blocage strict si keyscan est flaky
           echo -e "Host *\n\tStrictHostKeyChecking no\n" >> ~/.ssh/config
 
       # ============================================================
@@ -62,7 +84,7 @@ jobs:
       # ============================================================
       - name: Generate .cpanel.yml for RELEASE
         run: |
-          set -e
+          set -euo pipefail
           cat > .cpanel.yml <<'YML'
           ---
           deployment:
@@ -79,10 +101,26 @@ jobs:
 
       - name: Push to o2switch RELEASE repo
         run: |
-          set -e
-          git remote add o2switch_release "${{ secrets.O2SWITCH_REMOTE_RELEASE }}" || \
-            git remote set-url o2switch_release "${{ secrets.O2SWITCH_REMOTE_RELEASE }}"
+          set -euo pipefail
 
+          if [ -z "${O2SWITCH_REMOTE_RELEASE}" ]; then
+            echo "❌ Secret O2SWITCH_REMOTE_RELEASE vide/absent" >&2
+            exit 1
+          fi
+
+          echo "🔎 Remotes avant:"
+          git remote -v || true
+
+          if git remote get-url o2switch_release >/dev/null 2>&1; then
+            git remote set-url o2switch_release "${O2SWITCH_REMOTE_RELEASE}"
+          else
+            git remote add o2switch_release "${O2SWITCH_REMOTE_RELEASE}"
+          fi
+
+          echo "✅ Remote release configuré:"
+          git remote -v
+
+          # Si le repo est shallow, cPanel peut refuser: "shallow update not allowed"
           if git rev-parse --is-shallow-repository | grep -q true; then
             git fetch --unshallow
           fi
@@ -90,11 +128,11 @@ jobs:
           git push -f o2switch_release HEAD:refs/heads/main
 
       # ============================================================
-      # 2) SMOKE TESTS RELEASE
+      # 2) SMOKE TEST RELEASE
       # ============================================================
       - name: Smoke test RELEASE
         run: |
-          set -e
+          set -euo pipefail
           URL="https://release.p-wf.fr"
 
           echo "Checking $URL ..."
@@ -102,13 +140,12 @@ jobs:
             code=$(curl -k -s -o /dev/null -w "%{http_code}" "$URL" || true)
             echo "Attempt $i => HTTP $code"
             if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
-              echo "Release is reachable."
+              echo "✅ Release reachable"
               break
             fi
             sleep 8
           done
 
-          # Check contenu HTML
           curl -k -s "$URL" | head -n 20
 
       # ============================================================
@@ -116,7 +153,7 @@ jobs:
       # ============================================================
       - name: Generate .cpanel.yml for PROD
         run: |
-          set -e
+          set -euo pipefail
           cat > .cpanel.yml <<'YML'
           ---
           deployment:
@@ -133,15 +170,30 @@ jobs:
 
       - name: Push to o2switch PROD repo
         run: |
-          set -e
-          git remote add o2switch_prod "${{ secrets.O2SWITCH_REMOTE_PROD }}" || \
-            git remote set-url o2switch_prod "${{ secrets.O2SWITCH_REMOTE_PROD }}"
+          set -euo pipefail
+
+          if [ -z "${O2SWITCH_REMOTE_PROD}" ]; then
+            echo "❌ Secret O2SWITCH_REMOTE_PROD vide/absent" >&2
+            exit 1
+          fi
+
+          echo "🔎 Remotes avant:"
+          git remote -v || true
+
+          if git remote get-url o2switch_prod >/dev/null 2>&1; then
+            git remote set-url o2switch_prod "${O2SWITCH_REMOTE_PROD}"
+          else
+            git remote add o2switch_prod "${O2SWITCH_REMOTE_PROD}"
+          fi
+
+          echo "✅ Remote prod configuré:"
+          git remote -v
 
           git push -f o2switch_prod HEAD:refs/heads/main
 
       - name: Smoke test PROD
         run: |
-          set -e
+          set -euo pipefail
           URL="https://tp.p-wf.fr"
 
           echo "Checking $URL ..."
@@ -149,7 +201,7 @@ jobs:
             code=$(curl -k -s -o /dev/null -w "%{http_code}" "$URL" || true)
             echo "Attempt $i => HTTP $code"
             if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
-              echo "Prod is reachable."
+              echo "✅ Prod reachable"
               break
             fi
             sleep 8
