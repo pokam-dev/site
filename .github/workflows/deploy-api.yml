@@ -25,6 +25,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Show current commit & files
+        run: |
+          set -euo pipefail
+          echo "Commit:"
+          git rev-parse HEAD
+          echo "Branch:"
+          git branch --show-current || true
+          echo "Top files:"
+          ls -la
+
       # -------------------- TESTS --------------------
       - name: Basic project checks
         run: |
@@ -44,69 +54,36 @@ jobs:
           sudo apt-get install -y tidy
           tidy -errors -q index.html || echo "⚠️ Tidy a signalé des problèmes (non bloquant)"
 
-      # -------------------- (optionnel) Test API cPanel --------------------
-      # Utile uniquement si tu veux piloter des actions cPanel via API.
-      # Ici on fait juste un check "auth OK" (non bloquant).
-      - name: cPanel API sanity check (non-bloquant)
-        run: |
-          set -euo pipefail
-          if [ -n "${CPANEL_SERVER:-}" ] && [ -n "${CPANEL_LOGIN:-}" ] && [ -n "${CPANEL_TOKEN:-}" ]; then
-            curl -sS -k \
-              -H "Authorization: cpanel ${CPANEL_LOGIN}:${CPANEL_TOKEN}" \
-              "https://${CPANEL_SERVER}:2083/execute/VersionControl/list_repositories" \
-              | head -c 300 || true
-          else
-            echo "CPANEL_* secrets not set, skipping."
-          fi
-
       # -------------------- SSH --------------------
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.O2SWITCH_SSH_KEY }}
 
+      - name: Debug secrets presence (no leak)
+        run: |
+          set -euo pipefail
+          test -n "${O2SWITCH_REMOTE_RELEASE}" || (echo "❌ O2SWITCH_REMOTE_RELEASE est vide" >&2; exit 1)
+          test -n "${O2SWITCH_REMOTE_PROD}" || (echo "❌ O2SWITCH_REMOTE_PROD est vide" >&2; exit 1)
+          echo "✅ Remotes secrets are present."
+
       - name: Add o2switch host to known_hosts (best effort)
         run: |
           set -euo pipefail
-
-          # Détecte le host depuis l'URL release: ssh://user@host/....
           HOST=$(echo "${O2SWITCH_REMOTE_RELEASE}" | awk -F'[@/]' '{print $2}')
           echo "Detected host: $HOST"
-
           mkdir -p ~/.ssh
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts || true
-
-          # CI only: évite blocage strict si keyscan est flaky
           echo -e "Host *\n\tStrictHostKeyChecking no\n" >> ~/.ssh/config
 
-          # ... (votre code précédent : tests, SSH agent, etc.)
-
-      # ============================================================
-      # NOUVEAU : SAUVEGARDE AUTOMATIQUE VERS CLOUDFLARE R2
-      # ============================================================
-      - name: Sauvegarde vers Cloudflare R2
+      - name: SSH connectivity test (release host)
         run: |
-          sudo apt-get update && sudo apt-get install -y rclone
-          
-          # Configuration temporaire de rclone pour R2
-          export RCLONE_CONFIG_R2_TYPE=s3
-          export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
-          export RCLONE_CONFIG_R2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}
-          export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}
-          export RCLONE_CONFIG_R2_ENDPOINT=${{ secrets.R2_ENDPOINT }}
-          export RCLONE_CONFIG_R2_ACL=private
-
-          # Synchronisation vers un dossier daté dans votre bucket
-          # Le nom du bucket est "version-de-sauvegarde" (vu sur vos captures)
-          rclone sync ./ R2:"version-de-sauvegarde/backups/$(date +%Y-%m-%d_%H-%M)" \
-            --exclude ".git/**" \
-            --exclude ".github/**"
-
-      # ============================================================
-      # 1) DEPLOY RELEASE (Votre code existant continue ici)
-      # ============================================================
-      - name: Generate .cpanel.yml for RELEASE
-# ...
+          set -euo pipefail
+          HOST=$(echo "${O2SWITCH_REMOTE_RELEASE}" | awk -F'[@/]' '{print $2}')
+          echo "Testing ssh to $HOST ..."
+          # On teste juste la connexion, sans commande serveur
+          ssh -o BatchMode=yes -o ConnectTimeout=15 "${HOST}" true || true
+          echo "✅ SSH test step executed (even if host blocks command)."
 
       # ============================================================
       # 1) DEPLOY RELEASE
@@ -128,16 +105,13 @@ jobs:
               - /bin/echo "Deployed on $(/bin/date -Iseconds)" > "$DEPLOYPATH/deploy-info.txt"
           YML
 
-      - name: Push to o2switch RELEASE repo
+      - name: Push to o2switch RELEASE repo (with full debug)
         run: |
           set -euo pipefail
+          echo "Remote release is: (masked by GH if needed)"
+          echo "${O2SWITCH_REMOTE_RELEASE}"
 
-          if [ -z "${O2SWITCH_REMOTE_RELEASE}" ]; then
-            echo "❌ Secret O2SWITCH_REMOTE_RELEASE vide/absent" >&2
-            exit 1
-          fi
-
-          echo "🔎 Remotes avant:"
+          echo "🔎 Git remotes before:"
           git remote -v || true
 
           if git remote get-url o2switch_release >/dev/null 2>&1; then
@@ -146,14 +120,16 @@ jobs:
             git remote add o2switch_release "${O2SWITCH_REMOTE_RELEASE}"
           fi
 
-          echo "✅ Remote release configuré:"
+          echo "🔎 Git remotes after:"
           git remote -v
 
-          # Si le repo est shallow, cPanel peut refuser: "shallow update not allowed"
+          echo "🔎 Is shallow?"
+          git rev-parse --is-shallow-repository || true
           if git rev-parse --is-shallow-repository | grep -q true; then
             git fetch --unshallow
           fi
 
+          echo "🔎 Pushing HEAD to release/main..."
           git push -f o2switch_release HEAD:refs/heads/main
 
       # ============================================================
@@ -163,7 +139,6 @@ jobs:
         run: |
           set -euo pipefail
           URL="https://release.p-wf.fr"
-
           echo "Checking $URL ..."
           for i in $(seq 1 25); do
             code=$(curl -k -s -o /dev/null -w "%{http_code}" "$URL" || true)
@@ -174,7 +149,6 @@ jobs:
             fi
             sleep 8
           done
-
           curl -k -s "$URL" | head -n 20
 
       # ============================================================
@@ -200,31 +174,17 @@ jobs:
       - name: Push to o2switch PROD repo
         run: |
           set -euo pipefail
-
-          if [ -z "${O2SWITCH_REMOTE_PROD}" ]; then
-            echo "❌ Secret O2SWITCH_REMOTE_PROD vide/absent" >&2
-            exit 1
-          fi
-
-          echo "🔎 Remotes avant:"
-          git remote -v || true
-
           if git remote get-url o2switch_prod >/dev/null 2>&1; then
             git remote set-url o2switch_prod "${O2SWITCH_REMOTE_PROD}"
           else
             git remote add o2switch_prod "${O2SWITCH_REMOTE_PROD}"
           fi
-
-          echo "✅ Remote prod configuré:"
-          git remote -v
-
           git push -f o2switch_prod HEAD:refs/heads/main
 
       - name: Smoke test PROD
         run: |
           set -euo pipefail
           URL="https://tp.p-wf.fr"
-
           echo "Checking $URL ..."
           for i in $(seq 1 25); do
             code=$(curl -k -s -o /dev/null -w "%{http_code}" "$URL" || true)
@@ -235,5 +195,4 @@ jobs:
             fi
             sleep 8
           done
-
           curl -k -s "$URL" | head -n 20
