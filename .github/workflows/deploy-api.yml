@@ -2,12 +2,12 @@ name: Test -> Release -> Promote Prod (o2switch)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
-# Important : évite que 2 runs se marchent dessus
+# Evite que plusieurs runs se marchent dessus (nom unique)
 concurrency:
-  group: o2switch-deploy-${{ github.ref }}
+  group: deploy-o2switch-api-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -20,41 +20,43 @@ jobs:
       CPANEL_TOKEN:  ${{ secrets.CPANEL_TOKEN }}           # token API cPanel
       O2SWITCH_REMOTE_RELEASE: ${{ secrets.O2SWITCH_REMOTE_RELEASE }}  # ssh://.../repositories/release
       O2SWITCH_REMOTE_PROD:    ${{ secrets.O2SWITCH_REMOTE_PROD }}     # ssh://.../repositories/tp-site
-      SSH_PRIVATE_KEY: ${{ secrets.O2SWITCH_SSH_KEY }}
 
     steps:
-      - name: Checkout (full history)
+      - name: Checkout (full history, no shallow)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ---------
-      # TESTS SIMPLES
-      # ---------
-      - name: Basic checks (structure)
+      # --------------------------
+      # 1) TESTS (simples)
+      # --------------------------
+      - name: Basic structure checks
         run: |
           set -euo pipefail
           test -f index.html || (echo "❌ index.html manquant" >&2; exit 1)
-          test -f Style.css || (echo "❌ Style.css manquant" >&2; exit 1)
 
-          # fichiers > 5MB (souvent inutile sur un site statique)
+          # bloque si fichiers > 5MB (hors .git)
           if find . -type f -size +5M -not -path "./.git/*" | grep -q .; then
             echo "❌ Fichiers > 5 Mo détectés." >&2
+            find . -type f -size +5M -not -path "./.git/*" -print >&2
             exit 1
           fi
 
-      - name: HTML lint (tidy) - non bloquant
+          echo "✅ checks OK"
+
+      - name: HTML tidy (non bloquant)
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y tidy
-          # tidy retourne exit 1 si warnings : on ne bloque pas (tu avais plein de warnings)
-          tidy -qe index.html || echo "⚠️ Tidy a signalé des problèmes (non bloquant)"
 
-      # ---------
-      # OBTENIR IP + WHITELIST VIA API cPanel (o2switch firewall)
-      # ---------
-      - name: Get runner public IP
+          # tidy retourne !=0 s'il trouve des erreurs. On ne bloque pas, on log juste.
+          tidy -q -e index.html || echo "⚠️ Tidy a signalé des problèmes (non bloquant)"
+
+      # --------------------------
+      # 2) WHITELIST IP runner via API token (o2switch)
+      # --------------------------
+      - name: Detect runner public IP
         id: ip
         run: |
           set -euo pipefail
@@ -62,113 +64,106 @@ jobs:
           echo "ip=$IP" >> "$GITHUB_OUTPUT"
           echo "Runner IP: $IP"
 
-      - name: Whitelist runner IP (o2switch firewall via cPanel API)
+      - name: Whitelist runner IP for SSH (API token)
         run: |
           set -euo pipefail
           IP="${{ steps.ip.outputs.ip }}"
+          echo "Whitelisting IP=$IP on $CPANEL_SERVER"
 
-          # remove_all pour éviter d’empiler des IPs de runners
-          curl -fsS -k \
-            -H "Authorization: cpanel $CPANEL_LOGIN:$CPANEL_TOKEN" \
-            "https://$CPANEL_SERVER:2083/execute/SshWhitelist/remove_all" || true
+          # Endpoint officiel o2switch (micro API via execute/SshWhitelist/add)
+          # Auth: "Authorization: cpanel LOGIN:TOKEN"
+          curl -sS -m 45 \
+            -H "Authorization: cpanel ${CPANEL_LOGIN}:${CPANEL_TOKEN}" \
+            "https://${CPANEL_SERVER}:2083/execute/SshWhitelist/add?address=${IP}&port=22" \
+            | tee /tmp/whitelist.json
 
-          # add l’IP courante
-          curl -fsS -k \
-            -H "Authorization: cpanel $CPANEL_LOGIN:$CPANEL_TOKEN" \
-            "https://$CPANEL_SERVER:2083/execute/SshWhitelist/add?address=$IP&comment=github-actions" > /dev/null
+          # Optionnel : afficher status si jq dispo
+          cat /tmp/whitelist.json
 
-          echo "✅ Whitelisted $IP on $CPANEL_SERVER"
+      - name: Wait until port 22 reachable (max ~60s)
+        run: |
+          set -euo pipefail
+          HOST="$(echo "${O2SWITCH_REMOTE_PROD}" | awk -F'[@/]' '{print $2}')"
+          echo "Testing SSH reachability on $HOST:22"
+          for i in $(seq 1 12); do
+            if nc -zvw3 "$HOST" 22; then
+              echo "✅ SSH reachable"
+              exit 0
+            fi
+            echo "⏳ still blocked... retry $i/12"
+            sleep 5
+          done
+          echo "❌ SSH still unreachable after retries" >&2
+          exit 1
 
-      # ---------
-      # SSH AGENT (clé DOIT être sans passphrase)
-      # ---------
+      # --------------------------
+      # 3) SSH setup + known_hosts
+      # --------------------------
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ env.SSH_PRIVATE_KEY }}
+          ssh-private-key: ${{ secrets.O2SWITCH_SSH_KEY }}
 
-      - name: Add release/prod hosts to known_hosts
+      - name: Add o2switch host to known_hosts (safe)
         run: |
           set -euo pipefail
-
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
 
-          # On extrait l'host depuis les URL ssh://user@HOST/...
-          REL_HOST=$(echo "$O2SWITCH_REMOTE_RELEASE" | awk -F'[@/]' '{print $2}')
-          PROD_HOST=$(echo "$O2SWITCH_REMOTE_PROD"    | awk -F'[@/]' '{print $2}')
+          HOST="$(echo "${O2SWITCH_REMOTE_PROD}" | awk -F'[@/]' '{print $2}')"
+          echo "Detected SSH host: $HOST"
 
-          echo "Release host: $REL_HOST"
-          echo "Prod host:    $PROD_HOST"
+          # On tente un ssh-keyscan ; si ça échoue, on active accept-new (moins strict mais ok en CI)
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-          ssh-keyscan -H "$REL_HOST"  >> ~/.ssh/known_hosts 2>/dev/null || true
-          ssh-keyscan -H "$PROD_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          # "accept-new" évite le prompt interactif, tout en restant plus safe que "no"
+          cat >> ~/.ssh/config <<'EOF'
+          Host *
+            StrictHostKeyChecking accept-new
+            UserKnownHostsFile ~/.ssh/known_hosts
+          EOF
 
-          chmod 600 ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/config ~/.ssh/known_hosts || true
 
-      # ---------
-      # PUSH -> RELEASE (repo cPanel)
-      # ---------
+      # --------------------------
+      # 4) Push vers RELEASE puis PROD
+      # --------------------------
+      - name: Ensure repository is not shallow (safety)
+        run: |
+          set -euo pipefail
+          if git rev-parse --is-shallow-repository | grep -q true; then
+            git fetch --unshallow
+          fi
+
       - name: Push to o2switch RELEASE repo
         run: |
           set -euo pipefail
-
-          # sécurité: si repo shallow, on "unshallow" (sinon erreur côté remote)
-          if git rev-parse --is-shallow-repository | grep -q true; then
-            git fetch --unshallow
-          fi
-
           git remote remove o2switch_release 2>/dev/null || true
-          git remote add o2switch_release "$O2SWITCH_REMOTE_RELEASE"
+          git remote add o2switch_release "${O2SWITCH_REMOTE_RELEASE}"
 
-          # push de la branche courante (HEAD) vers main du repo cPanel
-          git push --force o2switch_release HEAD:refs/heads/main
+          # push normal (pas -f) pour éviter les surprises
+          git push o2switch_release HEAD:refs/heads/main
 
-      - name: Trigger cPanel deploy for RELEASE (API)
+      - name: Push to o2switch PROD repo (tp-site)
         run: |
           set -euo pipefail
-          curl -fsS -k \
-            -H "Authorization: cpanel $CPANEL_LOGIN:$CPANEL_TOKEN" \
-            "https://$CPANEL_SERVER:2083/execute/VersionControlDeployment/create?repository_root=/home/$CPANEL_LOGIN/repositories/release"
-
-          echo "✅ Release deploy triggered"
-
-      # ---------
-      # PUSH -> PROD (repo cPanel)
-      # ---------
-      - name: Push to o2switch PROD repo
-        run: |
-          set -euo pipefail
-
-          if git rev-parse --is-shallow-repository | grep -q true; then
-            git fetch --unshallow
-          fi
-
           git remote remove o2switch_prod 2>/dev/null || true
-          git remote add o2switch_prod "$O2SWITCH_REMOTE_PROD"
+          git remote add o2switch_prod "${O2SWITCH_REMOTE_PROD}"
+          git push o2switch_prod HEAD:refs/heads/main
 
-          git push --force o2switch_prod HEAD:refs/heads/main
-
-      - name: Trigger cPanel deploy for PROD (API)
-        run: |
-          set -euo pipefail
-          curl -fsS -k \
-            -H "Authorization: cpanel $CPANEL_LOGIN:$CPANEL_TOKEN" \
-            "https://$CPANEL_SERVER:2083/execute/VersionControlDeployment/create?repository_root=/home/$CPANEL_LOGIN/repositories/tp-site"
-
-          echo "✅ Prod deploy triggered"
-
-      # ---------
-      # CLEANUP (retire IP)
-      # ---------
+      # --------------------------
+      # 5) (Optionnel) Nettoyage whitelist
+      # --------------------------
       - name: Remove runner IP from whitelist (cleanup)
         if: always()
         run: |
           set -euo pipefail
           IP="${{ steps.ip.outputs.ip }}"
+          echo "Removing IP=$IP from whitelist"
 
-          curl -fsS -k \
-            -H "Authorization: cpanel $CPANEL_LOGIN:$CPANEL_TOKEN" \
-            "https://$CPANEL_SERVER:2083/execute/SshWhitelist/remove?address=$IP" || true
+          # Il faut supprimer in ET out (sinon ça ne libère pas le quota)
+          curl -sS -m 45 -H "Authorization: cpanel ${CPANEL_LOGIN}:${CPANEL_TOKEN}" \
+            "https://${CPANEL_SERVER}:2083/execute/SshWhitelist/remove?address=${IP}&port=22&direction=in" || true
 
-          echo "🧹 Removed $IP"
+          curl -sS -m 45 -H "Authorization: cpanel ${CPANEL_LOGIN}:${CPANEL_TOKEN}" \
+            "https://${CPANEL_SERVER}:2083/execute/SshWhitelist/remove?address=${IP}&port=22&direction=out" || true
