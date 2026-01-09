@@ -1,4 +1,4 @@
-name: Test -> Release -> Promote Prod (o2switch)
+name: Test -> Release -> Promote Prod (o2switch + Firewall API)
 
 on:
   push:
@@ -13,9 +13,9 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      CPANEL_SERVER:  ${{ secrets.CPANEL_SERVER }}
-      CPANEL_LOGIN:   ${{ secrets.CPANEL_LOGIN }}
-      CPANEL_TOKEN:   ${{ secrets.CPANEL_TOKEN }}
+      CPANEL_SERVER:  ${{ secrets.CPANEL_SERVER }}   # ex: truie.o2switch.net
+      CPANEL_LOGIN:   ${{ secrets.CPANEL_LOGIN }}    # ex: keze7545
+      CPANEL_TOKEN:   ${{ secrets.CPANEL_TOKEN }}    # token API cPanel
       O2SWITCH_REMOTE_RELEASE: ${{ secrets.O2SWITCH_REMOTE_RELEASE }}
       O2SWITCH_REMOTE_PROD:    ${{ secrets.O2SWITCH_REMOTE_PROD }}
 
@@ -24,16 +24,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Show current commit & files
-        run: |
-          set -euo pipefail
-          echo "Commit:"
-          git rev-parse HEAD
-          echo "Branch:"
-          git branch --show-current || true
-          echo "Top files:"
-          ls -la
 
       # -------------------- TESTS --------------------
       - name: Basic project checks
@@ -54,18 +44,45 @@ jobs:
           sudo apt-get install -y tidy
           tidy -errors -q index.html || echo "⚠️ Tidy a signalé des problèmes (non bloquant)"
 
+      # -------------------- RUNNER IP --------------------
+      - name: Get runner public IP
+        id: ip
+        run: |
+          set -euo pipefail
+          IP="$(curl -s https://api.ipify.org)"
+          echo "ip=$IP" >> "$GITHUB_OUTPUT"
+          echo "Runner IP: $IP"
+
+      # -------------------- FIREWALL EXCEPTION (API) --------------------
+      - name: Allow runner IP in o2switch firewall (API) - attempt #1
+        run: |
+          set -euo pipefail
+          IP="${{ steps.ip.outputs.ip }}"
+          echo "Allowing IP via API (attempt #1): $IP"
+
+          # Endpoint possible 1
+          curl -sS -k \
+            -H "Authorization: cpanel ${CPANEL_LOGIN}:${CPANEL_TOKEN}" \
+            "https://${CPANEL_SERVER}:2083/execute/O2switch_firewall/add?ip=${IP}&comment=github-actions" \
+            | head -c 800 || true
+
+      - name: Allow runner IP in o2switch firewall (API) - attempt #2
+        run: |
+          set -euo pipefail
+          IP="${{ steps.ip.outputs.ip }}"
+          echo "Allowing IP via API (attempt #2): $IP"
+
+          # Endpoint possible 2 (selon implémentation)
+          curl -sS -k \
+            -H "Authorization: cpanel ${CPANEL_LOGIN}:${CPANEL_TOKEN}" \
+            "https://${CPANEL_SERVER}:2083/execute/O2switchFirewall/add?ip=${IP}&comment=github-actions" \
+            | head -c 800 || true
+
       # -------------------- SSH --------------------
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.O2SWITCH_SSH_KEY }}
-
-      - name: Debug secrets presence (no leak)
-        run: |
-          set -euo pipefail
-          test -n "${O2SWITCH_REMOTE_RELEASE}" || (echo "❌ O2SWITCH_REMOTE_RELEASE est vide" >&2; exit 1)
-          test -n "${O2SWITCH_REMOTE_PROD}" || (echo "❌ O2SWITCH_REMOTE_PROD est vide" >&2; exit 1)
-          echo "✅ Remotes secrets are present."
 
       - name: Add o2switch host to known_hosts (best effort)
         run: |
@@ -75,15 +92,6 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts || true
           echo -e "Host *\n\tStrictHostKeyChecking no\n" >> ~/.ssh/config
-
-      - name: SSH connectivity test (release host)
-        run: |
-          set -euo pipefail
-          HOST=$(echo "${O2SWITCH_REMOTE_RELEASE}" | awk -F'[@/]' '{print $2}')
-          echo "Testing ssh to $HOST ..."
-          # On teste juste la connexion, sans commande serveur
-          ssh -o BatchMode=yes -o ConnectTimeout=15 "${HOST}" true || true
-          echo "✅ SSH test step executed (even if host blocks command)."
 
       # ============================================================
       # 1) DEPLOY RELEASE
@@ -105,14 +113,10 @@ jobs:
               - /bin/echo "Deployed on $(/bin/date -Iseconds)" > "$DEPLOYPATH/deploy-info.txt"
           YML
 
-      - name: Push to o2switch RELEASE repo (with full debug)
+      - name: Push to o2switch RELEASE repo
         run: |
           set -euo pipefail
-          echo "Remote release is: (masked by GH if needed)"
-          echo "${O2SWITCH_REMOTE_RELEASE}"
-
-          echo "🔎 Git remotes before:"
-          git remote -v || true
+          test -n "${O2SWITCH_REMOTE_RELEASE}" || (echo "❌ O2SWITCH_REMOTE_RELEASE vide" >&2; exit 1)
 
           if git remote get-url o2switch_release >/dev/null 2>&1; then
             git remote set-url o2switch_release "${O2SWITCH_REMOTE_RELEASE}"
@@ -120,21 +124,13 @@ jobs:
             git remote add o2switch_release "${O2SWITCH_REMOTE_RELEASE}"
           fi
 
-          echo "🔎 Git remotes after:"
-          git remote -v
-
-          echo "🔎 Is shallow?"
-          git rev-parse --is-shallow-repository || true
+          # Evite "shallow update not allowed"
           if git rev-parse --is-shallow-repository | grep -q true; then
             git fetch --unshallow
           fi
 
-          echo "🔎 Pushing HEAD to release/main..."
           git push -f o2switch_release HEAD:refs/heads/main
 
-      # ============================================================
-      # 2) SMOKE TEST RELEASE
-      # ============================================================
       - name: Smoke test RELEASE
         run: |
           set -euo pipefail
@@ -149,10 +145,10 @@ jobs:
             fi
             sleep 8
           done
-          curl -k -s "$URL" | head -n 20
+          curl -k -s "$URL" | head -n 30
 
       # ============================================================
-      # 3) PROMOTION PROD
+      # 2) PROMOTE PROD
       # ============================================================
       - name: Generate .cpanel.yml for PROD
         run: |
@@ -174,11 +170,14 @@ jobs:
       - name: Push to o2switch PROD repo
         run: |
           set -euo pipefail
+          test -n "${O2SWITCH_REMOTE_PROD}" || (echo "❌ O2SWITCH_REMOTE_PROD vide" >&2; exit 1)
+
           if git remote get-url o2switch_prod >/dev/null 2>&1; then
             git remote set-url o2switch_prod "${O2SWITCH_REMOTE_PROD}"
           else
             git remote add o2switch_prod "${O2SWITCH_REMOTE_PROD}"
           fi
+
           git push -f o2switch_prod HEAD:refs/heads/main
 
       - name: Smoke test PROD
@@ -195,4 +194,24 @@ jobs:
             fi
             sleep 8
           done
-          curl -k -s "$URL" | head -n 20
+          curl -k -s "$URL" | head -n 30
+
+      # -------------------- (OPTIONNEL) RETRAIT IP --------------------
+      - name: Remove runner IP from firewall (best effort)
+        if: always()
+        run: |
+          set -euo pipefail
+          IP="${{ steps.ip.outputs.ip }}"
+          echo "Removing IP (best effort): $IP"
+
+          # Endpoint possible 1
+          curl -sS -k \
+            -H "Authorization: cpanel ${CPANEL_LOGIN}:${CPANEL_TOKEN}" \
+            "https://${CPANEL_SERVER}:2083/execute/O2switch_firewall/remove?ip=${IP}" \
+            | head -c 800 || true
+
+          # Endpoint possible 2
+          curl -sS -k \
+            -H "Authorization: cpanel ${CPANEL_LOGIN}:${CPANEL_TOKEN}" \
+            "https://${CPANEL_SERVER}:2083/execute/O2switchFirewall/remove?ip=${IP}" \
+            | head -c 800 || true
