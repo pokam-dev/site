@@ -1,20 +1,9 @@
 ---
 deployment:
   tasks:
-    # Par défaut, PROD
     - export DEPLOY_FOLDER="${DEPLOY_FOLDER:-tp}"
     - export DEPLOYPATH="$HOME/public_html/${DEPLOY_FOLDER}"
-    - /bin/echo "Deploying to $DEPLOYPATH"
-
-    # Crée le dossier si besoin
     - /bin/mkdir -p "$DEPLOYPATH"
-
-    # Sync du contenu Git vers le docroot web
     - /usr/bin/rsync -az --delete --exclude ".git/" --exclude ".github/" ./ "$DEPLOYPATH/"
-
-    # Permissions safe (évite 403 / htaccess illisible)
     - /usr/bin/find "$DEPLOYPATH" -type d -exec chmod 755 {} \;
     - /usr/bin/find "$DEPLOYPATH" -type f -exec chmod 644 {} \;
-
-    # Trace utile
-    - /bin/echo "Deployed on $(/bin/date -Iseconds)" > "$DEPLOYPATH/deploy-info.txt"
